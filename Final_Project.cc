@@ -1,185 +1,336 @@
-// lora-energy.cc
-#include <iostream>
-#include <fstream>
-#include <cstdlib>
-#include "ns3/core-module.h"
-#include "ns3/network-module.h"
-#include "ns3/internet-module.h"
-#include "ns3/mobility-module.h"
-#include "ns3/buildings-module.h"
-#include "ns3/propagation-module.h"
-#include "ns3/propagation-delay-model.h"
-#include "ns3/lorawan-module.h"
-#include "ns3/applications-module.h"
-#include "ns3/energy-module.h"
-#include "ns3/buildings-propagation-loss-model.h"
-#include "ns3/oh-buildings-propagation-loss-model.h"
+/*
+ * Copyright (c) 2017 University of Padova
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Author: Davide Magrin <magrinda@dei.unipd.it>
+ */
 
-using namespace ns3;
-using namespace ns3::lorawan;
+ #include "ns3/basic-energy-source-helper.h"
+ #include "ns3/file-helper.h"
+ #include "ns3/lora-radio-energy-model-helper.h"
+ #include "ns3/building-allocator.h"
+ #include "ns3/building-penetration-loss.h"
+ #include "ns3/buildings-helper.h"
+ #include "ns3/callback.h"
+ #include "ns3/command-line.h"
+ #include "ns3/constant-position-mobility-model.h"
+ #include "ns3/correlated-shadowing-propagation-loss-model.h"
+ #include "ns3/double.h"
+ #include "ns3/end-device-lora-phy.h"
+ #include "ns3/end-device-lorawan-mac.h"
+ #include "ns3/forwarder-helper.h"
+ #include "ns3/gateway-lora-phy.h"
+ #include "ns3/gateway-lorawan-mac.h"
+ #include "ns3/log.h"
+ #include "ns3/lora-device-address.h"
+ #include "ns3/lora-frame-header.h"
+ #include "ns3/lora-helper.h"
+ #include "ns3/lora-net-device.h"
+ #include "ns3/lora-phy.h"
+ #include "ns3/lorawan-mac-header.h"
+ #include "ns3/mobility-helper.h"
+ #include "ns3/network-server-helper.h"
+ #include "ns3/node-container.h"
+ #include "ns3/periodic-sender-helper.h"
+ #include "ns3/pointer.h"
+ #include "ns3/position-allocator.h"
+ #include "ns3/random-variable-stream.h"
+ #include "ns3/simulator.h"
+ 
+ #include <algorithm>
+ #include <ctime>
+ 
+ using namespace ns3;
+ using namespace lorawan;
+ 
+ NS_LOG_COMPONENT_DEFINE("AlohaThroughput");
+ 
+ // Network settings
+ int nDevices = 200;                 //!< Number of end device nodes to create
+ int nGateways = 1;                  //!< Number of gateway nodes to create
+ double radiusMeters = 1000;         //!< Radius (m) of the deployment
+ double simulationTimeSeconds = 100; //!< Scenario duration (s) in simulated time
+ 
+ // Channel model
+ bool realisticChannelModel = false; //!< Whether to use a more realistic channel model with
+                                     //!< buildings and correlated shadowing
+ 
+ /** Record received pkts by Data Rate (DR) [index 0 -> DR5, index 5 -> DR0]. */
+ auto packetsSent = std::vector<int>(6, 0);
+ /** Record received pkts by Data Rate (DR) [index 0 -> DR5, index 5 -> DR0]. */
+ auto packetsReceived = std::vector<int>(6, 0);
+ 
+ /**
+  * Record the beginning of a transmission by an end device.
+  *
+  * \param packet A pointer to the packet sent.
+  * \param senderNodeId Node id of the sender end device.
+  */
+ void
+ OnTransmissionCallback(Ptr<const Packet> packet, uint32_t senderNodeId)
+ {
+     NS_LOG_FUNCTION(packet << senderNodeId);
+     LoraTag tag;
+     packet->PeekPacketTag(tag);
+     packetsSent.at(tag.GetSpreadingFactor() - 7)++;
+ }
+ 
+ /**
+  * Record the correct reception of a packet by a gateway.
+  *
+  * \param packet A pointer to the packet received.
+  * \param receiverNodeId Node id of the receiver gateway.
+  */
+ void
+ OnPacketReceptionCallback(Ptr<const Packet> packet, uint32_t receiverNodeId)
+ {
+     NS_LOG_FUNCTION(packet << receiverNodeId);
+     LoraTag tag;
+     packet->PeekPacketTag(tag);
+     packetsReceived.at(tag.GetSpreadingFactor() - 7)++;
+ }
+ 
+ int
+ main(int argc, char* argv[])
+ {
+     std::string interferenceMatrix = "aloha";
+ 
+     CommandLine cmd(__FILE__);
+     cmd.AddValue("nDevices", "Number of end devices to include in the simulation", nDevices);
+     cmd.AddValue("simulationTime", "Simulation Time (s)", simulationTimeSeconds);
+     cmd.AddValue("interferenceMatrix",
+                  "Interference matrix to use [aloha, goursaud]",
+                  interferenceMatrix);
+     cmd.AddValue("radius", "Radius (m) of the deployment", radiusMeters);
+     cmd.Parse(argc, argv);
+ 
+     // Set up logging
+     //LogComponentEnable("AlohaThroughput", LOG_LEVEL_ALL);
+ 
+     // Make all devices use SF7 (i.e., DR5)
+     Config::SetDefault ("ns3::EndDeviceLorawanMac::DataRate", UintegerValue (3));
+ 
+     if (interferenceMatrix == "aloha")
+     {
+         LoraInterferenceHelper::collisionMatrix = LoraInterferenceHelper::ALOHA;
+     }
+     else if (interferenceMatrix == "goursaud")
+     {
+         LoraInterferenceHelper::collisionMatrix = LoraInterferenceHelper::GOURSAUD;
+     }
+ 
+     /***********
+      *  Setup  *
+      ***********/
+ 
+     // Mobility
+     MobilityHelper mobility;
+     mobility.SetPositionAllocator("ns3::UniformDiscPositionAllocator",
+                                   "rho",
+                                   DoubleValue(radiusMeters),
+                                   "X",
+                                   DoubleValue(0.0),
+                                   "Y",
+                                   DoubleValue(0.0));
+     mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+ 
+     /************************
+      *  Create the channel  *
+      ************************/
+ 
+     // Create the lora channel object
+     Ptr<LogDistancePropagationLossModel> loss = CreateObject<LogDistancePropagationLossModel>();
+     loss->SetPathLossExponent(3.76);
+     loss->SetReference(1, 7.7);
+ 
+     if (realisticChannelModel)
+     {
+         // Create the correlated shadowing component
+         Ptr<CorrelatedShadowingPropagationLossModel> shadowing =
+             CreateObject<CorrelatedShadowingPropagationLossModel>();
+ 
+         // Aggregate shadowing to the logdistance loss
+         loss->SetNext(shadowing);
+ 
+         // Add the effect to the channel propagation loss
+         Ptr<BuildingPenetrationLoss> buildingLoss = CreateObject<BuildingPenetrationLoss>();
+ 
+         shadowing->SetNext(buildingLoss);
+     }
+ 
+     Ptr<PropagationDelayModel> delay = CreateObject<ConstantSpeedPropagationDelayModel>();
+ 
+     Ptr<LoraChannel> channel = CreateObject<LoraChannel>(loss, delay);
+ 
+     /************************
+      *  Create the helpers  *
+      ************************/
+ 
+     // Create the LoraPhyHelper
+     LoraPhyHelper phyHelper = LoraPhyHelper();
+     phyHelper.SetChannel(channel);
+ 
+     // Create the LorawanMacHelper
+     LorawanMacHelper macHelper = LorawanMacHelper();
+     macHelper.SetRegion(LorawanMacHelper::ALOHA);
+ 
+     // Create the LoraHelper
+     LoraHelper helper = LoraHelper();
+     helper.EnablePacketTracking(); // Output filename
+ 
+     /************************
+      *  Create End Devices  *
+      ************************/
+ 
+     // Create a set of nodes
+     NodeContainer endDevices;
+     endDevices.Create(nDevices);
+ 
+     // Assign a mobility model to each node
+     mobility.Install(endDevices);
+ 
+     // Make it so that nodes are at a certain height > 0
+     for (auto j = endDevices.Begin(); j != endDevices.End(); ++j)
+     {
+         Ptr<MobilityModel> mobility = (*j)->GetObject<MobilityModel>();
+         Vector position = mobility->GetPosition();
+         position.z = 1.2;
+         mobility->SetPosition(position);
+     }
+ 
+     // Create the LoraNetDevices of the end devices
+     uint8_t nwkId = 54;
+     uint32_t nwkAddr = 1864;
+     Ptr<LoraDeviceAddressGenerator> addrGen =
+         CreateObject<LoraDeviceAddressGenerator>(nwkId, nwkAddr);
+ 
+     // Create the LoraNetDevices of the end devices
+     macHelper.SetAddressGenerator(addrGen);
+     phyHelper.SetDeviceType(LoraPhyHelper::ED);
+     macHelper.SetDeviceType(LorawanMacHelper::ED_A);
+     NetDeviceContainer endDevicesNetDevices = helper.Install(phyHelper, macHelper, endDevices);
+ 
+     // Now end devices are connected to the channel
+ 
+     // Connect trace sources
+     for (auto j = endDevices.Begin(); j != endDevices.End(); ++j)
+     {
+         Ptr<Node> node = *j;
+         Ptr<LoraNetDevice> loraNetDevice = node->GetDevice(0)->GetObject<LoraNetDevice>();
+         Ptr<LoraPhy> phy = loraNetDevice->GetPhy();
+     }
+ 
+     /*********************
+      *  Create Gateways  *
+      *********************/
+ 
+     // Create the gateway nodes (allocate them uniformly on the disc)
+     NodeContainer gateways;
+     gateways.Create(nGateways);
+ 
+     Ptr<ListPositionAllocator> allocator = CreateObject<ListPositionAllocator>();
+     // Make it so that nodes are at a certain height > 0
+     allocator->Add(Vector(0.0, 0.0, 15.0));
+     mobility.SetPositionAllocator(allocator);
+     mobility.Install(gateways);
+ 
+     // Create a netdevice for each gateway
+     phyHelper.SetDeviceType(LoraPhyHelper::GW);
+     macHelper.SetDeviceType(LorawanMacHelper::GW);
+     helper.Install(phyHelper, macHelper, gateways);
 
-NS_LOG_COMPONENT_DEFINE("LoraEnergySimulation");
+     helper.EnablePeriodicDeviceStatusPrinting(endDevices, gateways, "test.txt", Seconds(100));
+ 
+     NS_LOG_DEBUG("Completed configuration");
+ 
+     /*********************************************
+      *  Install applications on the end devices  *
+      *********************************************/
+ 
+     Time appStopTime = Seconds(simulationTimeSeconds);
+     int packetSize = 50;
+     PeriodicSenderHelper appHelper = PeriodicSenderHelper();
+     appHelper.SetPeriod(Seconds(50));
+     appHelper.SetPacketSize(packetSize);
+     ApplicationContainer appContainer = appHelper.Install(endDevices);
+ 
+     appContainer.Start(Seconds(0));
+     appContainer.Stop(appStopTime);
+ 
+     // Install trace sources
+     for (auto node = gateways.Begin(); node != gateways.End(); node++)
+     {
+         (*node)->GetDevice(0)->GetObject<LoraNetDevice>()->GetPhy()->TraceConnectWithoutContext(
+             "ReceivedPacket",
+             MakeCallback(OnPacketReceptionCallback));
+     }
+ 
+     // Install trace sources
+     for (auto node = endDevices.Begin(); node != endDevices.End(); node++)
+     {
+         (*node)->GetDevice(0)->GetObject<LoraNetDevice>()->GetPhy()->TraceConnectWithoutContext(
+             "StartSending",
+             MakeCallback(OnTransmissionCallback));
+     }
+ 
+     LorawanMacHelper::SetSpreadingFactorsUp(endDevices, gateways, channel);
 
-int main(int argc, char *argv[])
-{
-    // Parameterised command line
-    double txPower; uint32_t sf; double freq; uint32_t runId; double simTime = 3600.0;
-    CommandLine cmd;
-    cmd.AddValue("txPower", "Transmission power in dBm", txPower);
-    cmd.AddValue("sf", "LoRa spreading factor (7-12)", sf);
-    cmd.AddValue("freq", "Frequency in Hz", freq);
-    cmd.AddValue("runId", "Run identifier", runId);
-    cmd.AddValue("simTime", "Simulation time (seconds)", simTime);
-    cmd.Parse(argc, argv);
-    NS_LOG_INFO("Parameters: txPower="<<txPower<<" dBm, sf="<<sf<<", freq="<<freq<<" Hz, runId="<<runId<<", simTime="<<simTime<<"s");
+     /************************
+     * Install Energy Model *
+     ************************/
 
-    // Reproducibility
-    SeedManager::SetSeed(12345);
-    SeedManager::SetRun(runId);
+    BasicEnergySourceHelper basicSourceHelper;
+    LoraRadioEnergyModelHelper radioEnergyHelper;
 
-    // Create output directory
-    system("mkdir -p results");
+    // configure energy source
+    basicSourceHelper.Set("BasicEnergySourceInitialEnergyJ", DoubleValue(10000)); // Energy in J
+    basicSourceHelper.Set("BasicEnergySupplyVoltageV", DoubleValue(3.3));
 
-    // Create nodes
-    NodeContainer endDevices; endDevices.Create(200);
-    NodeContainer gateways;   gateways.Create(1);
+    radioEnergyHelper.Set("StandbyCurrentA", DoubleValue(0.0014));
+    radioEnergyHelper.Set("TxCurrentA", DoubleValue(0.028));
+    radioEnergyHelper.Set("SleepCurrentA", DoubleValue(0.0000015));
+    radioEnergyHelper.Set("RxCurrentA", DoubleValue(0.0112));
 
-    // Install internet stack
-    InternetStackHelper internet;
-    internet.Install(endDevices);
-    internet.Install(gateways);
+    radioEnergyHelper.SetTxCurrentModel("ns3::ConstantLoraTxCurrentModel",
+                                        "TxCurrent",
+                                        DoubleValue(0.028));
 
-    // Mobility: gateway on rooftop
-    MobilityHelper gwMobility;
-    Ptr<ListPositionAllocator> gwPos = CreateObject<ListPositionAllocator>();
-    gwPos->Add(Vector(400.0, 400.0, 25.0));
-    gwMobility.SetPositionAllocator(gwPos);
-    gwMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-    gwMobility.Install(gateways);
+    // install source on end devices' nodes
+    EnergySourceContainer sources = basicSourceHelper.Install(endDevices);
+    Names::Add("/Names/EnergySource", sources.Get(0));
 
-    // Mobility: end-devices randomly on sidewalks at z=1.5m
-    MobilityHelper devMobility;
-    devMobility.SetPositionAllocator("ns3::RandomRectanglePositionAllocator",
-        "X", StringValue("ns3::UniformRandomVariable[Min=0.0|Max=800.0]"),
-        "Y", StringValue("ns3::UniformRandomVariable[Min=0.0|Max=800.0]"));
-    devMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-    devMobility.Install(endDevices);
+    // install device model
+    DeviceEnergyModelContainer deviceModels =
+        radioEnergyHelper.Install(endDevicesNetDevices, sources);
 
-    // Create ~50 buildings
-    Ptr<UniformRandomVariable> xVar = CreateObject<UniformRandomVariable>();
-    Ptr<UniformRandomVariable> yVar = CreateObject<UniformRandomVariable>();
-    xVar->SetAttribute("Min", DoubleValue(0.0)); xVar->SetAttribute("Max", DoubleValue(800.0));
-    yVar->SetAttribute("Min", DoubleValue(0.0)); yVar->SetAttribute("Max", DoubleValue(800.0));
-    for (uint32_t i = 0; i < 50; ++i) {
-        double x = xVar->GetValue(), y = yVar->GetValue();
-        Ptr<Building> b = CreateObject<Building>();
-        b->SetBoundaries(Box(x, x+50.0, y, y+50.0, 0.0, 5*3.0));
-        b->SetNFloors(5);
-        b->SetAttribute("WallLoss", DoubleValue(15.0));
-        BuildingList::Add(b);
-    }
-    BuildingsHelper::Install(endDevices);
-    BuildingsHelper::Install(gateways);
-
-    // Propagation: LogDistance + OH building shadowing
-    Ptr<LogDistancePropagationLossModel> logDist = CreateObject<LogDistancePropagationLossModel>();
-    logDist->SetPathLossExponent(3.0);
-    Ptr<OhBuildingsPropagationLossModel> buildingLoss = CreateObject<OhBuildingsPropagationLossModel>();
-    buildingLoss->SetAttribute("ShadowingSigmaIndoor",  DoubleValue(7.0));
-    buildingLoss->SetAttribute("ShadowingSigmaOutdoor", DoubleValue(7.0));
-    logDist->SetNext(buildingLoss);
-    Ptr<PropagationDelayModel> delay = CreateObject<ConstantSpeedPropagationDelayModel>();
-    Ptr<LoraChannel> channel = CreateObject<LoraChannel>(logDist, delay);
-
-    // LoRaWAN PHY/MAC helpers
-    LoraPhyHelper phyHelper;
-    phyHelper.SetChannel(channel);
-    phyHelper.SetDeviceType(LoraPhyHelper::ED);
-
-    LorawanMacHelper macHelper;
-    macHelper.SetDeviceType(LorawanMacHelper::ED_A);
-    macHelper.SetRegion(LorawanMacHelper::EU);
-
-    LoraHelper loraHelper;
-
-    // Install end-devices
-    NetDeviceContainer endDevDevices = loraHelper.Install(phyHelper, macHelper, endDevices);
-
-    // Install gateway
-    phyHelper.SetDeviceType(LoraPhyHelper::GW);
-    macHelper.SetDeviceType(LorawanMacHelper::GW);
-    NetDeviceContainer gwDevices = loraHelper.Install(phyHelper, macHelper, gateways);
-
-    // Configure PHY attributes
-    phyHelper.Set("TxPower",        DoubleValue(txPower));
-    phyHelper.Set("FrequencyMHz",   DoubleValue(freq / 1e6));
-    phyHelper.Set("SpreadingFactor", UintegerValue(sf));
-
-    // Energy model
-    BasicEnergySourceHelper sourceHelper;
-    sourceHelper.Set("BasicEnergySourceInitialEnergyJ", DoubleValue(3 * 3600 * 3.0));
-    ns3::energy::EnergySourceContainer sources = sourceHelper.Install(endDevices);
-
-    LoraRadioEnergyModelHelper radioHelper;
-    radioHelper.Set("TxCurrentA",   DoubleValue(0.024));
-    radioHelper.Set("RxCurrentA",   DoubleValue(0.0108));
-    radioHelper.Set("IdleCurrentA", DoubleValue(0.0015));
-    radioHelper.Set("SleepCurrentA",DoubleValue(0.000001));
-    ns3::energy::DeviceEnergyModelContainer deviceModels =
-        radioHelper.Install(endDevDevices, sources);
-
-    // IP addressing (assign gateway first so its address is known)
-    Ipv4AddressHelper ipv4;
-    ipv4.SetBase("10.1.1.0", "255.255.255.0");
-    Ipv4InterfaceContainer gwIfaces = ipv4.Assign(gwDevices);
-    Ipv4InterfaceContainer devIfaces = ipv4.Assign(endDevDevices);
-
-    // Applications: UDP sink on gateway
-    uint16_t port = 12345;
-    Address sinkAddr(InetSocketAddress(gwIfaces.GetAddress(0), port));
-    PacketSinkHelper sinkHelper("ns3::UdpSocketFactory", sinkAddr);
-    ApplicationContainer sinkApp = sinkHelper.Install(gateways);
-    sinkApp.Start(Seconds(0.0));
-    sinkApp.Stop(Seconds(simTime));
-
-    // OnOff traffic from end-devices
-    OnOffHelper onOff("ns3::UdpSocketFactory", sinkAddr);
-    onOff.SetAttribute("OnTime",  StringValue("ns3::ConstantRandomVariable[Constant=0.001]"));
-    onOff.SetAttribute("OffTime", StringValue("ns3::ConstantRandomVariable[Constant=9.999]"));
-    onOff.SetAttribute("PacketSize", UintegerValue(50));
-    onOff.SetAttribute("DataRate", DataRateValue(DataRate("400kbps")));
-    ApplicationContainer apps = onOff.Install(endDevices);
-    apps.Start(Seconds(0.0));
-    apps.Stop(Seconds(simTime));
-
-    // ASCII tracing (packet-level)
-    AsciiTraceHelper ascii;
-    Ptr<OutputStreamWrapper> phyStream = ascii.CreateFileStream("results/trace_phy.csv");
-    Ptr<OutputStreamWrapper> macStream = ascii.CreateFileStream("results/trace_mac.csv");
-    loraHelper.EnablePacketTracking(); // connects internal traces
-
-    // Run simulation
-    Simulator::Stop(Seconds(simTime));
-    Simulator::Run();
-    Simulator::Destroy();
-
-    // Compute metrics
-    Ptr<PacketSink> sink = DynamicCast<PacketSink>(sinkApp.Get(0));
-    double bytesReceived = sink->GetTotalRx();
-    double throughput    = bytesReceived * 8.0 / simTime;
-
-    double energyConsumed = 0.0;
-    for (uint32_t i = 0; i < sources.GetN(); ++i) {
-        Ptr<energy::BasicEnergySource> bs = DynamicCast<energy::BasicEnergySource>(sources.Get(i));
-        energyConsumed += bs->GetInitialEnergy() - bs->GetRemainingEnergy();
-    }
-    double efficiency = throughput / energyConsumed;
-
-    // Write summary
-    std::ofstream summary("results/summary.csv", std::ios::app);
-    summary << txPower << "," << sf << "," << freq << ","
-            << throughput << "," << efficiency << "," << runId << "\n";
-    summary.close();
-
-    return 0;
-}
+    /**************
+     * Get output *
+     **************/
+    FileHelper fileHelper;
+    fileHelper.ConfigureFile("battery-level", FileAggregator::SPACE_SEPARATED);
+    fileHelper.WriteProbe("ns3::DoubleProbe", "/Names/EnergySource/RemainingEnergy", "Output");
+ 
+     ////////////////
+     // Simulation //
+     ////////////////
+ 
+     Simulator::Stop(appStopTime);
+ 
+     NS_LOG_INFO("Running simulation...");
+     Simulator::Run();
+ 
+     Simulator::Destroy();
+ 
+     /////////////////////////////
+     // Print results to stdout //
+     /////////////////////////////
+     NS_LOG_INFO("Computing performance metrics...");
+ 
+     for (int i = 0; i < 6; i++)
+     {
+         std::cout << packetsSent.at(i) << " " << packetsReceived.at(i) << std::endl;
+     }
+ 
+     return 0;
+ }
