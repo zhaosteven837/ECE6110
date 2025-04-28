@@ -47,7 +47,7 @@
  NS_LOG_COMPONENT_DEFINE("AlohaThroughput");
  
  // Network settings
- int nDevices = 200;                 //!< Number of end device nodes to create
+ int nDevices = 20;                 //!< Number of end device nodes to create
  int nGateways = 1;                  //!< Number of gateway nodes to create
  double radiusMeters = 1000;         //!< Radius (m) of the deployment
  double simulationTimeSeconds = 100; //!< Scenario duration (s) in simulated time
@@ -74,6 +74,7 @@
      LoraTag tag;
      packet->PeekPacketTag(tag);
      packetsSent.at(tag.GetSpreadingFactor() - 7)++;
+     printf("Send: %d, %f\n", tag.GetSpreadingFactor(), tag.GetFrequency());
  }
  
  /**
@@ -89,19 +90,41 @@
      LoraTag tag;
      packet->PeekPacketTag(tag);
      packetsReceived.at(tag.GetSpreadingFactor() - 7)++;
+     printf("Receive: %d, %f\n", tag.GetSpreadingFactor(), tag.GetFrequency());
  }
  
  int
  main(int argc, char* argv[])
  {
-     std::string interferenceMatrix = "aloha";
- 
+
+     // Set up logging
+     // LogComponentEnable ("LoraChannel", LOG_LEVEL_INFO);
+     // LogComponentEnable ("LoraPhy", LOG_LEVEL_ALL);
+     // LogComponentEnable ("EndDeviceLoraPhy", LOG_LEVEL_ALL);
+     // LogComponentEnable("GatewayLoraPhy", LOG_LEVEL_ALL);
+     // LogComponentEnable("SimpleGatewayLoraPhy", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LoraInterferenceHelper", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LorawanMac", LOG_LEVEL_ALL);
+     // LogComponentEnable ("EndDeviceLorawanMac", LOG_LEVEL_ALL);
+     // LogComponentEnable ("ClassAEndDeviceLorawanMac", LOG_LEVEL_ALL);
+     // LogComponentEnable("GatewayLorawanMac", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LogicalLoraChannelHelper", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LogicalLoraChannel", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LoraHelper", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LoraPhyHelper", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LorawanMacHelper", LOG_LEVEL_ALL);
+     // LogComponentEnable ("OneShotSenderHelper", LOG_LEVEL_ALL);
+     // LogComponentEnable ("OneShotSender", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LorawanMacHeader", LOG_LEVEL_ALL);
+     // LogComponentEnable ("LoraFrameHeader", LOG_LEVEL_ALL);
+     // LogComponentEnableAll(LOG_PREFIX_FUNC);
+     // LogComponentEnableAll(LOG_PREFIX_NODE);
+     // LogComponentEnableAll(LOG_PREFIX_TIME);
+
+     int dataRate = 5;
      CommandLine cmd(__FILE__);
      cmd.AddValue("nDevices", "Number of end devices to include in the simulation", nDevices);
      cmd.AddValue("simulationTime", "Simulation Time (s)", simulationTimeSeconds);
-     cmd.AddValue("interferenceMatrix",
-                  "Interference matrix to use [aloha, goursaud]",
-                  interferenceMatrix);
      cmd.AddValue("radius", "Radius (m) of the deployment", radiusMeters);
      cmd.Parse(argc, argv);
  
@@ -109,16 +132,7 @@
      //LogComponentEnable("AlohaThroughput", LOG_LEVEL_ALL);
  
      // Make all devices use SF7 (i.e., DR5)
-     Config::SetDefault ("ns3::EndDeviceLorawanMac::DataRate", UintegerValue (3));
- 
-     if (interferenceMatrix == "aloha")
-     {
-         LoraInterferenceHelper::collisionMatrix = LoraInterferenceHelper::ALOHA;
-     }
-     else if (interferenceMatrix == "goursaud")
-     {
-         LoraInterferenceHelper::collisionMatrix = LoraInterferenceHelper::GOURSAUD;
-     }
+     Config::SetDefault ("ns3::EndDeviceLorawanMac::DataRate", UintegerValue (dataRate));
  
      /***********
       *  Setup  *
@@ -173,7 +187,7 @@
  
      // Create the LorawanMacHelper
      LorawanMacHelper macHelper = LorawanMacHelper();
-     macHelper.SetRegion(LorawanMacHelper::ALOHA);
+     macHelper.SetRegion(LorawanMacHelper::EU);
  
      // Create the LoraHelper
      LoraHelper helper = LoraHelper();
@@ -251,7 +265,7 @@
      Time appStopTime = Seconds(simulationTimeSeconds);
      int packetSize = 50;
      PeriodicSenderHelper appHelper = PeriodicSenderHelper();
-     appHelper.SetPeriod(Seconds(50));
+     appHelper.SetPeriod(Seconds(1));
      appHelper.SetPacketSize(packetSize);
      ApplicationContainer appContainer = appHelper.Install(endDevices);
  
@@ -273,8 +287,6 @@
              "StartSending",
              MakeCallback(OnTransmissionCallback));
      }
- 
-     LorawanMacHelper::SetSpreadingFactorsUp(endDevices, gateways, channel);
 
      /************************
      * Install Energy Model *
@@ -310,6 +322,17 @@
     FileHelper fileHelper;
     fileHelper.ConfigureFile("battery-level", FileAggregator::SPACE_SEPARATED);
     fileHelper.WriteProbe("ns3::DoubleProbe", "/Names/EnergySource/RemainingEnergy", "Output");
+
+    for (uint32_t i = 0; i < endDevices.GetN(); i++)
+    {
+
+        endDevices.Get(i)
+            ->GetDevice(0)
+            ->GetObject<LoraNetDevice>()
+            ->GetMac()
+            ->GetObject<EndDeviceLorawanMac>()
+            ->SetDataRate(5);
+    }
  
      ////////////////
      // Simulation //
