@@ -12,7 +12,7 @@ futures = []
 def runScript(nDevices, packetDelay, simulationTime, radius, packetSize, dataRate):
     returnThing = subprocess.run(['./ns3', 'run', 'scratch/Final_Project.cc --nDevices=' + nDevices + '--packetDelay=' + packetDelay + '--simulationTime=' + simulationTime + '--radius=' + radius + '--packetSize=' + packetSize + '--dataRate=' + dataRate], stdout=subprocess.PIPE)
     try:
-        ipc = "nDevices: " + nDevices + ", packetDelay: " + packetDelay + ", simulationTime: " + simulationTime + ", radius: " + radius + ", packetSize: " + packetSize + ", dataRate: " + dataRate + ", " + returnThing.stdout.decode('utf-8').splitlines()[0].split()[2] + ", " + returnThing.stdout.decode('utf-8').splitlines()[1].split()[4] + ", " + returnThing.stdout.decode('utf-8').splitlines()[1].split()[5] + "\n"
+        ipc = nDevices + ", " + packetDelay + ", " + simulationTime + ", " + radius + ", " + packetSize + ", " + dataRate + ", " + returnThing.stdout.decode('utf-8').splitlines()[0].split()[2] + ", " + returnThing.stdout.decode('utf-8').splitlines()[1].split()[4] + ", " + returnThing.stdout.decode('utf-8').splitlines()[1].split()[5] + "\n"
     except:
         print("error on config: " + "nDevices: " + nDevices + ", packetDelay: " + packetDelay + ", simulationTime: " + simulationTime + ", radius: " + radius + ", packetSize: " + packetSize + ", dataRate: " + dataRate)
         ipc = "error"
@@ -21,8 +21,8 @@ def runScript(nDevices, packetDelay, simulationTime, radius, packetSize, dataRat
 def test():
     return 1
 
-with open("dump2.txt", "w"):
-    pass
+with open("dump.txt", "w") as myfile:
+    myfile.write("nDevices, packetDelay, simulationTime, radius, packetSize, dataRate, energyConsumed, packetsSent, packetsReceived\n")
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
     for nDevice in nDevices:
@@ -35,5 +35,5 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
                             futures.append(future)
 
     for future in concurrent.futures.as_completed(futures):
-        with open("dump2.txt", "a") as myfile:
+        with open("dump.txt", "a") as myfile:
             myfile.write(future.result())
