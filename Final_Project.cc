@@ -51,47 +51,8 @@
  int nGateways = 1;                  //!< Number of gateway nodes to create
  double radiusMeters = 1000;         //!< Radius (m) of the deployment
  double simulationTimeSeconds = 100; //!< Scenario duration (s) in simulated time
- 
- // Channel model
- bool realisticChannelModel = false; //!< Whether to use a more realistic channel model with
-                                     //!< buildings and correlated shadowing
- 
- /** Record received pkts by Data Rate (DR) [index 0 -> DR5, index 5 -> DR0]. */
- auto packetsSent = std::vector<int>(6, 0);
- /** Record received pkts by Data Rate (DR) [index 0 -> DR5, index 5 -> DR0]. */
- auto packetsReceived = std::vector<int>(6, 0);
- 
- /**
-  * Record the beginning of a transmission by an end device.
-  *
-  * \param packet A pointer to the packet sent.
-  * \param senderNodeId Node id of the sender end device.
-  */
- void
- OnTransmissionCallback(Ptr<const Packet> packet, uint32_t senderNodeId)
- {
-     NS_LOG_FUNCTION(packet << senderNodeId);
-     LoraTag tag;
-     packet->PeekPacketTag(tag);
-     packetsSent.at(tag.GetSpreadingFactor() - 7)++;
-     printf("Send: %d, %f\n", tag.GetSpreadingFactor(), tag.GetFrequency());
- }
- 
- /**
-  * Record the correct reception of a packet by a gateway.
-  *
-  * \param packet A pointer to the packet received.
-  * \param receiverNodeId Node id of the receiver gateway.
-  */
- void
- OnPacketReceptionCallback(Ptr<const Packet> packet, uint32_t receiverNodeId)
- {
-     NS_LOG_FUNCTION(packet << receiverNodeId);
-     LoraTag tag;
-     packet->PeekPacketTag(tag);
-     packetsReceived.at(tag.GetSpreadingFactor() - 7)++;
-     printf("Receive: %d, %f\n", tag.GetSpreadingFactor(), tag.GetFrequency());
- }
+ int packetDelay = 1;
+ int packetSize = 50;
  
  int
  main(int argc, char* argv[])
@@ -126,13 +87,16 @@
      cmd.AddValue("nDevices", "Number of end devices to include in the simulation", nDevices);
      cmd.AddValue("simulationTime", "Simulation Time (s)", simulationTimeSeconds);
      cmd.AddValue("radius", "Radius (m) of the deployment", radiusMeters);
+     cmd.AddValue("packetDelay", "Time (s) between packets", packetDelay);
+     cmd.AddValue("packetSize", "Size of packet", packetSize);
+     cmd.AddValue("dataRate", "Lorawan data rate (0-5)", dataRate);
      cmd.Parse(argc, argv);
  
      // Set up logging
      //LogComponentEnable("AlohaThroughput", LOG_LEVEL_ALL);
  
      // Make all devices use SF7 (i.e., DR5)
-     Config::SetDefault ("ns3::EndDeviceLorawanMac::DataRate", UintegerValue (dataRate));
+     Config::SetDefault("ns3::EndDeviceLorawanMac::DataRate", UintegerValue(dataRate));
  
      /***********
       *  Setup  *
@@ -141,12 +105,9 @@
      // Mobility
      MobilityHelper mobility;
      mobility.SetPositionAllocator("ns3::UniformDiscPositionAllocator",
-                                   "rho",
-                                   DoubleValue(radiusMeters),
-                                   "X",
-                                   DoubleValue(0.0),
-                                   "Y",
-                                   DoubleValue(0.0));
+                                   "rho", DoubleValue(radiusMeters),
+                                   "X", DoubleValue(0.0),
+                                   "Y", DoubleValue(0.0));
      mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
  
      /************************
@@ -157,21 +118,6 @@
      Ptr<LogDistancePropagationLossModel> loss = CreateObject<LogDistancePropagationLossModel>();
      loss->SetPathLossExponent(3.76);
      loss->SetReference(1, 7.7);
- 
-     if (realisticChannelModel)
-     {
-         // Create the correlated shadowing component
-         Ptr<CorrelatedShadowingPropagationLossModel> shadowing =
-             CreateObject<CorrelatedShadowingPropagationLossModel>();
- 
-         // Aggregate shadowing to the logdistance loss
-         loss->SetNext(shadowing);
- 
-         // Add the effect to the channel propagation loss
-         Ptr<BuildingPenetrationLoss> buildingLoss = CreateObject<BuildingPenetrationLoss>();
- 
-         shadowing->SetNext(buildingLoss);
-     }
  
      Ptr<PropagationDelayModel> delay = CreateObject<ConstantSpeedPropagationDelayModel>();
  
@@ -257,36 +203,57 @@
      helper.EnablePeriodicDeviceStatusPrinting(endDevices, gateways, "test.txt", Seconds(100));
  
      NS_LOG_DEBUG("Completed configuration");
- 
+
+     /***********************************************
+      *  Allocate buildings & install building info  *
+      ***********************************************/
+
+     // Urban grid parameters
+     const double blockLength = 120.0; // Block size for a medium-scale urban block
+     const double streetWidth = 25.1;  // Size for a roadway + sidewalk + furnishing
+
+     const double blockSpacing = blockLength + streetWidth;
+     
+     // Parameters for a 5x5 grid covering the radius space
+     uint32_t gridWidth = static_cast<uint32_t>(2 * radiusMeters / blockSpacing) + 1;
+     //uint32_t gridHeight = gridWidth;
+     double xLength = 2 * radiusMeters;
+     double yLength = xLength;
+     double deltaX = xLength / (gridWidth - 1);
+     double deltaY = deltaX;
+
+     // Create buildings on a grid
+     Ptr<GridBuildingAllocator> gridBuilder = CreateObject<GridBuildingAllocator>();
+     gridBuilder->SetAttribute("GridWidth", UintegerValue(gridWidth));
+     //gridBuilder->SetAttribute("GridHeight", UintegerValue(gridHeight));
+     gridBuilder->SetAttribute("MinX", DoubleValue(-radiusMeters));
+     gridBuilder->SetAttribute("MinY", DoubleValue(-radiusMeters));
+     gridBuilder->SetAttribute("LengthX", DoubleValue(xLength));
+     gridBuilder->SetAttribute("LengthY", DoubleValue(yLength));
+     gridBuilder->SetAttribute("DeltaX", DoubleValue(deltaX));
+     gridBuilder->SetAttribute("DeltaY", DoubleValue(deltaY));
+     gridBuilder->SetAttribute("Height", DoubleValue(16.0));
+
+     // Set the interior attributes of the buildings
+     gridBuilder->SetBuildingAttribute("NFloors", UintegerValue(5));
+
+     BuildingContainer bContainer = gridBuilder->Create(gridWidth * gridWidth);
+
+     BuildingsHelper::Install(endDevices);
+     BuildingsHelper::Install(gateways);
+
      /*********************************************
       *  Install applications on the end devices  *
       *********************************************/
  
-     Time appStopTime = Seconds(simulationTimeSeconds);
-     int packetSize = 50;
+     Time appStopTime = Hours(1);
      PeriodicSenderHelper appHelper = PeriodicSenderHelper();
-     appHelper.SetPeriod(Seconds(1));
+     appHelper.SetPeriod(Seconds(packetDelay));
      appHelper.SetPacketSize(packetSize);
      ApplicationContainer appContainer = appHelper.Install(endDevices);
  
      appContainer.Start(Seconds(0));
      appContainer.Stop(appStopTime);
- 
-     // Install trace sources
-     for (auto node = gateways.Begin(); node != gateways.End(); node++)
-     {
-         (*node)->GetDevice(0)->GetObject<LoraNetDevice>()->GetPhy()->TraceConnectWithoutContext(
-             "ReceivedPacket",
-             MakeCallback(OnPacketReceptionCallback));
-     }
- 
-     // Install trace sources
-     for (auto node = endDevices.Begin(); node != endDevices.End(); node++)
-     {
-         (*node)->GetDevice(0)->GetObject<LoraNetDevice>()->GetPhy()->TraceConnectWithoutContext(
-             "StartSending",
-             MakeCallback(OnTransmissionCallback));
-     }
 
      /************************
      * Install Energy Model *
@@ -295,35 +262,36 @@
     BasicEnergySourceHelper basicSourceHelper;
     LoraRadioEnergyModelHelper radioEnergyHelper;
 
-    // configure energy source
-    basicSourceHelper.Set("BasicEnergySourceInitialEnergyJ", DoubleValue(10000)); // Energy in J
-    basicSourceHelper.Set("BasicEnergySupplyVoltageV", DoubleValue(3.3));
+    // LAQ4 -- LoRaWAN Air Quality Sensor
+    // 4000mAh Li-SOCI2 battery
+    // 3.6 Nominal Voltage
+    // 9 uA Standby/Idle Current
+    // 24 - 150 mA Tx Current
+    // Semtech SX1276 LoRa radio - 9.9mA Rx draw
+    basicSourceHelper.Set("BasicEnergySourceInitialEnergyJ", DoubleValue(51840)); // Energy in J
+    basicSourceHelper.Set("BasicEnergySupplyVoltageV", DoubleValue(3.6));
 
-    radioEnergyHelper.Set("StandbyCurrentA", DoubleValue(0.0014));
-    radioEnergyHelper.Set("TxCurrentA", DoubleValue(0.028));
-    radioEnergyHelper.Set("SleepCurrentA", DoubleValue(0.0000015));
+    radioEnergyHelper.Set("StandbyCurrentA", DoubleValue(0.000009));
+    radioEnergyHelper.Set("TxCurrentA", DoubleValue(0.0150));
+    radioEnergyHelper.Set("SleepCurrentA", DoubleValue(0.000009));
     radioEnergyHelper.Set("RxCurrentA", DoubleValue(0.0112));
 
-    radioEnergyHelper.SetTxCurrentModel("ns3::ConstantLoraTxCurrentModel",
+    radioEnergyHelper.SetTxCurrentModel("ns3::ConstantLoraTxCurrentModel", // I don't really know what value could go here from the documentation
                                         "TxCurrent",
-                                        DoubleValue(0.028));
+                                        DoubleValue(0.0150));
 
     // install source on end devices' nodes
     EnergySourceContainer sources = basicSourceHelper.Install(endDevices);
-    Names::Add("/Names/EnergySource", sources.Get(0));
 
     // install device model
     DeviceEnergyModelContainer deviceModels =
         radioEnergyHelper.Install(endDevicesNetDevices, sources);
 
     /**************
-     * Get output *
+     * Change Specific End Device Data Rates *
      **************/
-    FileHelper fileHelper;
-    fileHelper.ConfigureFile("battery-level", FileAggregator::SPACE_SEPARATED);
-    fileHelper.WriteProbe("ns3::DoubleProbe", "/Names/EnergySource/RemainingEnergy", "Output");
-
-    for (uint32_t i = 0; i < endDevices.GetN(); i++)
+    
+    /*for (uint32_t i = 0; i < endDevices.GetN(); i++)
     {
 
         endDevices.Get(i)
@@ -332,7 +300,11 @@
             ->GetMac()
             ->GetObject<EndDeviceLorawanMac>()
             ->SetDataRate(5);
-    }
+    }*/
+
+    /**************
+     * Get output *
+     **************/
  
      ////////////////
      // Simulation //
@@ -350,10 +322,10 @@
      /////////////////////////////
      NS_LOG_INFO("Computing performance metrics...");
  
-     for (int i = 0; i < 6; i++)
-     {
-         std::cout << packetsSent.at(i) << " " << packetsReceived.at(i) << std::endl;
-     }
+     LoraPacketTracker& tracker = helper.GetPacketTracker();
+     NS_LOG_INFO("Printing total sent MAC-layer packets and successful MAC-layer packets");
+     std::cout << "Energy Remaining: " << deviceModels.Get(0)->GetTotalEnergyConsumption() << std::endl;
+     std::cout << "(Packets sent, Packets received): " << tracker.CountMacPacketsGlobally(Seconds(0), appStopTime + Hours(24)) << std::endl;
  
      return 0;
  }
