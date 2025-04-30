@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-only
  *
  * Author: Davide Magrin <magrinda@dei.unipd.it>
+ * 
+ * Modified by: Steven Zhao and Daniel Alvarado
  */
 
  #include "ns3/basic-energy-source-helper.h"
@@ -48,7 +50,6 @@
  
  // Network settings
  int nDevices = 20;                 //!< Number of end device nodes to create
- int nGateways = 1;                  //!< Number of gateway nodes to create
  double radiusMeters = 1000;         //!< Radius (m) of the deployment
  double simulationTime = 1; //!< Scenario duration (s) in simulated time
  int packetDelay = 1;
@@ -205,7 +206,7 @@
      // Make it so that nodes are at a certain height > 0
      allocator->Add(Vector(0.0, 0.0, 15.0));
      mobility.SetPositionAllocator(allocator);
-     mobility.Install(gateways);
+     mobility.Install(1);
  
      // Create a netdevice for each gateway
      phyHelper.SetDeviceType(LoraPhyHelper::GW);

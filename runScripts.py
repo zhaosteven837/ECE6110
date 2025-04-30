@@ -1,17 +1,19 @@
 import concurrent.futures
 import subprocess
 
-file = "packetDelays.txt"
+file = "radiiTest.txt"
 
 #nDevices = ['20', '40', '60', '80', '100', '120', '140', '160', '180', '200']
-nDevices = ['1']
-packetDelays = ['1', '5', '10', '25', '50', '100']
+nDevices = ['100']
+#packetDelays = ['1', '5', '10', '15', '20', '25', '30', '35', '40', '45', '50', '55', '60', '65', '70', '75', '80', '85', '90', '95', '100']
+packetDelays = ['100']
 simulationTime = ['5']
-radii = ['1000']
+#radii = ['1000']
+radii = ['1000', '5000', '10000', '15000', '20000', '25000']
 #packetSizes = ['5', '10', '50', '100']
 packetSizes = ['50']
-dataRates = ['5']
-#dataRates = ['3', '4', '5']
+#dataRates = ['5']
+dataRates = ['3', '4', '5']
 futures = []
 
 def runScript(nDevices, packetDelay, simulationTime, radius, packetSize, dataRate):
@@ -24,9 +26,6 @@ def runScript(nDevices, packetDelay, simulationTime, radius, packetSize, dataRat
         ipc = "error"
     return ipc
 
-def test():
-    return 1
-
 with open(file, "w") as myfile:
     myfile.write("nDevices, packetDelay, simulationTime, radius, packetSize, dataRate, energyConsumed, packetsSent, packetsReceived\n")
 
@@ -37,7 +36,6 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
                 for radius in radii:
                     for packetSize in packetSizes:
                         for dataRate in dataRates:
-                            print(packetDelay)
                             future=executor.submit(runScript, nDevice, packetDelay, simTime, radius, packetSize, dataRate)
                             futures.append(future)
 
