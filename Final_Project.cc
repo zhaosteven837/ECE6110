@@ -44,13 +44,13 @@
  using namespace ns3;
  using namespace lorawan;
  
- NS_LOG_COMPONENT_DEFINE("AlohaThroughput");
+ NS_LOG_COMPONENT_DEFINE("LorawanThroughputEnergy");
  
  // Network settings
  int nDevices = 20;                 //!< Number of end device nodes to create
  int nGateways = 1;                  //!< Number of gateway nodes to create
  double radiusMeters = 1000;         //!< Radius (m) of the deployment
- double simulationTimeSeconds = 100; //!< Scenario duration (s) in simulated time
+ double simulationTime = 1; //!< Scenario duration (s) in simulated time
  int packetDelay = 1;
  int packetSize = 50;
  
@@ -85,7 +85,7 @@
      int dataRate = 5;
      CommandLine cmd(__FILE__);
      cmd.AddValue("nDevices", "Number of end devices to include in the simulation", nDevices);
-     cmd.AddValue("simulationTime", "Simulation Time (s)", simulationTimeSeconds);
+     cmd.AddValue("simulationTime", "Simulation Time (s)", simulationTime);
      cmd.AddValue("radius", "Radius (m) of the deployment", radiusMeters);
      cmd.AddValue("packetDelay", "Time (s) between packets", packetDelay);
      cmd.AddValue("packetSize", "Size of packet", packetSize);
@@ -93,7 +93,9 @@
      cmd.Parse(argc, argv);
  
      // Set up logging
-     //LogComponentEnable("AlohaThroughput", LOG_LEVEL_ALL);
+     //LogComponentEnable("LorawanThroughputEnergy", LOG_LEVEL_ALL);
+
+     LoraInterferenceHelper::collisionMatrix = LoraInterferenceHelper::ALOHA;
  
      // Make all devices use SF7 (i.e., DR5)
      Config::SetDefault("ns3::EndDeviceLorawanMac::DataRate", UintegerValue(dataRate));
@@ -118,11 +120,21 @@
      Ptr<LogDistancePropagationLossModel> loss = CreateObject<LogDistancePropagationLossModel>();
      loss->SetPathLossExponent(3.76);
      loss->SetReference(1, 7.7);
- 
+
+     Ptr<CorrelatedShadowingPropagationLossModel> shadowing =
+     CreateObject<CorrelatedShadowingPropagationLossModel>();
+
+     // Aggregate shadowing to the logdistance loss
+     loss->SetNext(shadowing);
+
+     // Add the effect to the channel propagation loss
+     Ptr<BuildingPenetrationLoss> buildingLoss = CreateObject<BuildingPenetrationLoss>();
+
+     shadowing->SetNext(buildingLoss);
+
      Ptr<PropagationDelayModel> delay = CreateObject<ConstantSpeedPropagationDelayModel>();
  
      Ptr<LoraChannel> channel = CreateObject<LoraChannel>(loss, delay);
- 
      /************************
       *  Create the helpers  *
       ************************/
@@ -246,7 +258,7 @@
       *  Install applications on the end devices  *
       *********************************************/
  
-     Time appStopTime = Hours(1);
+     Time appStopTime = Hours(simulationTime);
      PeriodicSenderHelper appHelper = PeriodicSenderHelper();
      appHelper.SetPeriod(Seconds(packetDelay));
      appHelper.SetPacketSize(packetSize);
@@ -324,7 +336,12 @@
  
      LoraPacketTracker& tracker = helper.GetPacketTracker();
      NS_LOG_INFO("Printing total sent MAC-layer packets and successful MAC-layer packets");
-     std::cout << "Energy Remaining: " << deviceModels.Get(0)->GetTotalEnergyConsumption() << std::endl;
+     double totalEnergyConsumed = 0.0;
+     for (uint32_t i = 0; i < endDevices.GetN(); i++) {
+        totalEnergyConsumed += deviceModels.Get(i)->GetTotalEnergyConsumption();
+     }
+     totalEnergyConsumed = totalEnergyConsumed;
+     std::cout << "Energy Consumed: " << totalEnergyConsumed << std::endl;
      std::cout << "(Packets sent, Packets received): " << tracker.CountMacPacketsGlobally(Seconds(0), appStopTime + Hours(24)) << std::endl;
  
      return 0;
